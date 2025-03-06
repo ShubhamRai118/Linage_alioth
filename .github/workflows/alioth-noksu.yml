@@ -1,4 +1,4 @@
-name: FakeDreamer - clang-r547379 noksu
+name: LineageDark - clang-r547379 noksu
 
 on:
   pull_request:
@@ -9,19 +9,19 @@ on:
         required: false
       KERNEL_TREE:
         description: 'Kernel Tree'
-        default: 'https://github.com/re-noroi/kernel_sm8250'
+        default: 'https://github.com/ShubhamRai118/Linage_alioth'
         required: true
       KERNEL_TREE_BRANCH:
         description: 'Kernel Tree Branch'
         required: true
-        default: 'no-ksu'
+        default: 'lineage_22.1'
       CODENAME:
         description: 'Phone Codename'
         default: 'alioth'
         required: true
       ANYKERNEL_URL:
         description: 'AnyKernel Url (leave blank if you dont want AnyKernel)'
-        default: 'https://github.com/re-noroi/anykernel3-stock'
+        default: 'https://github.com/ShubhamRai118/anykernel3-stock'
         required: false
       ANYKERNEL_BRANCH:
         description: 'AnyKernel Branch (defaults to codename)'
@@ -108,7 +108,7 @@ jobs:
         if [ -e "dtbo.img" ]; then
           cp -f dtbo.img AnyKernel3/alioth-aosp-dtbo.img
         fi
-        name=FakeDreamer-stk-noksu-${{ github.event.inputs.CODENAME }}-${{ github.run_id }}.zip
+        name=Dark_Kernel_LG-stk-noksu-${{ github.event.inputs.CODENAME }}-${{ github.run_id }}.zip
         cd AnyKernel3
         zip -q -r $name *
         mv $name ../
