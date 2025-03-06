@@ -14,7 +14,7 @@ on:
       KERNEL_TREE_BRANCH:
         description: 'Kernel Tree Branch'
         required: true
-        default: 'lineage_22.1'
+        default: 'lineage-22.1'
       CODENAME:
         description: 'Phone Codename'
         default: 'alioth'
