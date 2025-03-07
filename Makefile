@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 VERSION = 4
 PATCHLEVEL = 19
-SUBLEVEL = 312
+SUBLEVEL = 329
 EXTRAVERSION =
 NAME = "People's Front"
 
@@ -372,10 +372,10 @@ else
 HOSTCC	= gcc
 HOSTCXX	= g++
 endif
-KBUILD_HOSTCFLAGS   := -Wall -Wmissing-prototypes -Wstrict-prototypes -O2 \
+KBUILD_HOSTCFLAGS   := -Wall -Wmissing-prototypes -Wstrict-prototypes -O3 \
 		-fomit-frame-pointer -std=gnu89 $(HOST_LFS_CFLAGS) \
 		$(HOSTCFLAGS)
-KBUILD_HOSTCXXFLAGS := -O2 $(HOST_LFS_CFLAGS) $(HOSTCXXFLAGS)
+KBUILD_HOSTCXXFLAGS := -O3 $(HOST_LFS_CFLAGS) $(HOSTCXXFLAGS)
 KBUILD_HOSTLDFLAGS  := $(HOST_LFS_LDFLAGS) $(HOSTLDFLAGS)
 KBUILD_HOSTLDLIBS   := $(HOST_LFS_LIBS) $(HOSTLDLIBS)
 
@@ -419,7 +419,7 @@ CHECKFLAGS     := -D__linux__ -Dlinux -D__STDC__ -Dunix -D__unix__ \
 NOSTDINC_FLAGS  =
 CFLAGS_MODULE   =
 AFLAGS_MODULE   =
-LDFLAGS_MODULE  =
+LDFLAGS_MODULE  = --strip-debug
 CFLAGS_KERNEL	=
 AFLAGS_KERNEL	=
 LDFLAGS_vmlinux =
@@ -636,16 +636,6 @@ ifdef CONFIG_FUNCTION_TRACER
   CC_FLAGS_FTRACE := -pg
 endif
 
-# Make toolchain changes before including arch/$(SRCARCH)/Makefile to ensure
-# ar/cc/ld-* macros return correct values.
-ifdef CONFIG_LTO_CLANG
-# use llvm-ar for building symbol tables from IR files, and llvm-nm instead
-# of objdump for processing symbol versions and exports
-LLVM_AR		:= llvm-ar
-LLVM_NM		:= llvm-nm
-export LLVM_AR LLVM_NM
-endif
-
 # The arch Makefile can set ARCH_{CPP,A,C}FLAGS to override the default
 # values of the respective KBUILD_* variables
 ARCH_CPPFLAGS :=
@@ -689,21 +679,47 @@ include/config/auto.conf:
 endif # may-sync-config
 endif # $(dot-config)
 
-KBUILD_CFLAGS	+= $(call cc-option,-fno-delete-null-pointer-checks,)
 KBUILD_CFLAGS	+= $(call cc-disable-warning,frame-address,)
 KBUILD_CFLAGS	+= $(call cc-disable-warning, format-truncation)
 KBUILD_CFLAGS	+= $(call cc-disable-warning, format-overflow)
 KBUILD_CFLAGS	+= $(call cc-disable-warning, int-in-bool-context)
 KBUILD_CFLAGS	+= $(call cc-disable-warning, address-of-packed-member)
 
-ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
+ifeq ($(CONFIG_CC_OPTIMIZE_FOR_SIZE), y)
 KBUILD_CFLAGS   += -Os
+KBUILD_AFLAGS   += -Os
+KBUILD_LDFLAGS  += -Os
+else ifeq ($(cc-name),clang)
+KBUILD_CFLAGS   += -mllvm -hot-cold-split=true
+KBUILD_CFLAGS   += -O2 -march=armv8.2-a+lse+crypto+dotprod -mtune=cortex-a55
+KBUILD_AFLAGS   += -O2 -march=armv8.2-a+lse+crypto+dotprod -mtune=cortex-a55
+# Machine Learning Optimization
+KBUILD_CFLAGS   += -mllvm -regalloc-enable-advisor=release
+KBUILD_LDFLAGS  += -mllvm -regalloc-enable-advisor=release
+KBUILD_LDFLAGS  += -mllvm -enable-ml-inliner=release
+
 else
 KBUILD_CFLAGS   += -O2
+KBUILD_AFLAGS   += -O2
+KBUILD_LDFLAGS  += -O2
+
+ifdef CONFIG_INLINE_OPTIMIZATION
+ifdef CONFIG_CC_IS_CLANG
+KBUILD_CFLAGS	+= -mllvm -inline-threshold=2500
+KBUILD_CFLAGS	+= -mllvm -inlinehint-threshold=2000
+KBUILD_CFLAGS	+= -mllvm -unroll-threshold=1200
+else ifdef CONFIG_CC_IS_GCC
+KBUILD_CFLAGS	+= --param max-inline-insns-single=600
+KBUILD_CFLAGS	+= --param max-inline-insns-auto=750
+
+# We limit inlining to 5KB on the stack.
+KBUILD_CFLAGS	+= --param large-stack-frame=12288
+
+KBUILD_CFLAGS	+= --param inline-min-speedup=5
+KBUILD_CFLAGS	+= --param inline-unit-growth=60
+endif
 endif
 
-ifdef CONFIG_CC_WERROR
-KBUILD_CFLAGS  += -Werror
 endif
 
 # Tell gcc to never replace conditional load with a non-conditional one
@@ -740,6 +756,27 @@ stackp-flags-$(CONFIG_STACKPROTECTOR_STRONG)      := -fstack-protector-strong
 KBUILD_CFLAGS += $(stackp-flags-y)
 
 ifeq ($(cc-name),clang)
+ifdef CONFIG_POLLY_CLANG
+KBUILD_CFLAGS	+= -mllvm -polly \
+		   -mllvm -polly-ast-use-context \
+		   -mllvm -polly-invariant-load-hoisting \
+		   -mllvm -polly-run-inliner \
+		   -mllvm -polly-vectorizer=stripmine
+ifeq ($(shell test $(CONFIG_CLANG_VERSION) -gt 130000; echo $$?),0)
+KBUILD_CFLAGS	+= -mllvm -polly-loopfusion-greedy=1 \
+		   -mllvm -polly-reschedule=1 \
+		   -mllvm -polly-postopts=1
+else
+KBUILD_CFLAGS	+= -mllvm -polly-opt-fusion=max
+endif
+# Polly may optimise loops with dead paths beyound what the linker
+# can understand. This may negate the effect of the linker's DCE
+# so we tell Polly to perfom proven DCE on the loops it optimises
+# in order to preserve the overall effect of the linker's DCE.
+ifdef CONFIG_LD_DEAD_CODE_DATA_ELIMINATION
+KBUILD_CFLAGS	+= -mllvm -polly-run-dce
+endif
+endif
 ifneq ($(CROSS_COMPILE),)
 CLANG_TRIPLE	?= $(CROSS_COMPILE)
 CLANG_TARGET	:= --target=$(notdir $(CLANG_TRIPLE:%-=%))
@@ -756,22 +793,25 @@ KBUILD_CFLAGS += $(call cc-disable-warning, gnu)
 KBUILD_CFLAGS += $(call cc-disable-warning, duplicate-decl-specifier)
 KBUILD_CFLAGS += -Wno-asm-operand-widths
 KBUILD_CFLAGS += -Wno-initializer-overrides
+KBUILD_CFLAGS += -Wnull-dereference
 KBUILD_CFLAGS += $(call cc-option, -Wno-undefined-optimized)
 KBUILD_CFLAGS += $(call cc-option, -Wno-tautological-constant-out-of-range-compare)
 KBUILD_CFLAGS += $(call cc-option, -mllvm -disable-struct-const-merge)
+KBUILD_CFLAGS += $(call cc-disable-warning, builtin-macro-redefined)
+KBUILD_CFLAGS += $(call cc-disable-warning, address-of-packed-member)
 
-# Quiet clang warning: comparison of unsigned expression < 0 is always false
-KBUILD_CFLAGS += $(call cc-disable-warning, tautological-compare)
-# CLANG uses a _MergedGlobals as optimization, but this breaks modpost, as the
-# source of a reference will be _MergedGlobals and not on of the whitelisted names.
-# See modpost pattern 2
-KBUILD_CFLAGS += $(call cc-option, -mno-global-merge,)
 KBUILD_CFLAGS += $(call cc-option, -fcatch-undefined-behavior)
 endif
 
 # These warnings generated too much noise in a regular build.
 # Use make W=1 to enable them (see scripts/Makefile.extrawarn)
 KBUILD_CFLAGS += $(call cc-disable-warning, unused-but-set-variable)
+
+ifdef CONFIG_LTO_CLANG
+KBUILD_LDFLAGS += -O3 --lto-O3 --strip-debug
+else
+KBUILD_LDFLAGS += -O3 --strip-debug
+endif
 
 KBUILD_CFLAGS += $(call cc-disable-warning, unused-const-variable)
 
@@ -805,15 +845,15 @@ KBUILD_CFLAGS	+= -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-f
 endif
 endif
 
-KBUILD_CFLAGS   += $(call cc-option, -fno-var-tracking-assignments)
-
 KBUILD_CFLAGS   += $(call cc-option, -Wvla)
+
+DEBUG_CFLAGS	:= $(call cc-option, -fno-var-tracking-assignments)
 
 ifdef CONFIG_DEBUG_INFO
 ifdef CONFIG_DEBUG_INFO_SPLIT
-KBUILD_CFLAGS   += $(call cc-option, -gsplit-dwarf, -g)
+DEBUG_CFLAGS	+= $(call cc-option, -gsplit-dwarf, -g)
 else
-KBUILD_CFLAGS	+= -g
+DEBUG_CFLAGS	+= -g
 endif
 ifeq ($(LLVM_IAS),1)
 KBUILD_AFLAGS	+= -g
@@ -823,26 +863,31 @@ endif
 endif
 
 ifdef CONFIG_DEBUG_INFO_DWARF4
-KBUILD_CFLAGS	+= $(call cc-option, -gdwarf-4,)
+DEBUG_CFLAGS	+= $(call cc-option, -gdwarf-4,)
 endif
 
 ifdef CONFIG_DEBUG_INFO_REDUCED
-KBUILD_CFLAGS 	+= $(call cc-option, -femit-struct-debug-baseonly) \
+DEBUG_CFLAGS	+= $(call cc-option, -femit-struct-debug-baseonly) \
 		   $(call cc-option,-fno-var-tracking)
 endif
 
+KBUILD_CFLAGS += $(DEBUG_CFLAGS)
+export DEBUG_CFLAGS
+
 ifdef CONFIG_FUNCTION_TRACER
-ifdef CONFIG_FTRACE_MCOUNT_RECORD
-  # gcc 5 supports generating the mcount tables directly
-  ifeq ($(call cc-option-yn,-mrecord-mcount),y)
-    CC_FLAGS_FTRACE	+= -mrecord-mcount
-    export CC_USING_RECORD_MCOUNT := 1
-  endif
+ifdef CONFIG_FTRACE_MCOUNT_USE_CC
+  CC_FLAGS_FTRACE	+= -mrecord-mcount
   ifdef CONFIG_HAVE_NOP_MCOUNT
     ifeq ($(call cc-option-yn, -mnop-mcount),y)
       CC_FLAGS_FTRACE	+= -mnop-mcount
       CC_FLAGS_USING	+= -DCC_USING_NOP_MCOUNT
     endif
+  endif
+endif
+ifdef CONFIG_FTRACE_MCOUNT_USE_RECORDMCOUNT
+  ifdef CONFIG_HAVE_C_RECORDMCOUNT
+    BUILD_C_RECORDMCOUNT := y
+    export BUILD_C_RECORDMCOUNT
   endif
 endif
 ifdef CONFIG_HAVE_FENTRY
@@ -854,12 +899,6 @@ endif
 export CC_FLAGS_FTRACE
 KBUILD_CFLAGS	+= $(CC_FLAGS_FTRACE) $(CC_FLAGS_USING)
 KBUILD_AFLAGS	+= $(CC_FLAGS_USING)
-ifdef CONFIG_DYNAMIC_FTRACE
-	ifdef CONFIG_HAVE_C_RECORDMCOUNT
-		BUILD_C_RECORDMCOUNT := y
-		export BUILD_C_RECORDMCOUNT
-	endif
-endif
 endif
 
 # We trigger additional mismatches with less inlining
@@ -870,36 +909,6 @@ endif
 ifdef CONFIG_LD_DEAD_CODE_DATA_ELIMINATION
 KBUILD_CFLAGS_KERNEL += -ffunction-sections -fdata-sections
 LDFLAGS_vmlinux += --gc-sections
-endif
-
-ifdef CONFIG_LTO_CLANG
-ifdef CONFIG_THINLTO
-lto-clang-flags	:= -flto=thin
-KBUILD_LDFLAGS	+= --thinlto-cache-dir=.thinlto-cache
-else
-lto-clang-flags	:= -flto
-endif
-lto-clang-flags += -fvisibility=default $(call cc-option, -fsplit-lto-unit)
-
-# Limit inlining across translation units to reduce binary size
-LD_FLAGS_LTO_CLANG := -mllvm -import-instr-limit=5
-
-KBUILD_LDFLAGS += $(LD_FLAGS_LTO_CLANG)
-KBUILD_LDFLAGS_MODULE += $(LD_FLAGS_LTO_CLANG)
-
-KBUILD_LDFLAGS_MODULE += -T scripts/module-lto.lds
-
-# allow disabling only clang LTO where needed
-DISABLE_LTO_CLANG := -fno-lto
-export DISABLE_LTO_CLANG
-endif
-
-ifdef CONFIG_LTO
-LTO_CFLAGS	:= $(lto-clang-flags)
-KBUILD_CFLAGS	+= $(LTO_CFLAGS)
-
-DISABLE_LTO	:= $(DISABLE_LTO_CLANG)
-export LTO_CFLAGS DISABLE_LTO
 endif
 
 ifdef CONFIG_CFI_CLANG
@@ -933,6 +942,31 @@ ifdef CONFIG_SHADOW_CALL_STACK
 CC_FLAGS_SCS	:= -fsanitize=shadow-call-stack
 KBUILD_CFLAGS	+= $(CC_FLAGS_SCS)
 export CC_FLAGS_SCS
+endif
+
+ifdef CONFIG_LTO_CLANG
+ifdef CONFIG_LTO_CLANG_THIN
+CC_FLAGS_LTO	+= -flto=thin -fsplit-lto-unit -funified-lto
+KBUILD_LDFLAGS	+= --thinlto-cache-dir=.thinlto-cache --thinlto-jobs=$(nproc --all)
+else
+CC_FLAGS_LTO	+= -flto
+endif
+CC_FLAGS_LTO	+= -fvisibility=hidden
+
+CC_FLAGS_LTO	+= -fsplit-machine-functions
+
+# Limit inlining across translation units to reduce binary size
+KBUILD_LDFLAGS += -mllvm -import-instr-limit=40
+
+# Check for frame size exceeding threshold during prolog/epilog insertion.
+ifneq ($(CONFIG_FRAME_WARN),0)
+KBUILD_LDFLAGS	+= -plugin-opt=-warn-stack-size=$(CONFIG_FRAME_WARN)
+endif
+endif
+
+ifdef CONFIG_LTO
+KBUILD_CFLAGS	+= $(CC_FLAGS_LTO)
+export CC_FLAGS_LTO
 endif
 
 # arch Makefile may override CC so keep this after arch Makefile is included
@@ -972,9 +1006,6 @@ KBUILD_CFLAGS	+= $(call cc-option,-fmerge-constants)
 
 # Make sure -fstack-check isn't enabled (like gentoo apparently did)
 KBUILD_CFLAGS  += $(call cc-option,-fno-stack-check,)
-
-# conserve stack if available
-KBUILD_CFLAGS   += $(call cc-option,-fconserve-stack)
 
 # disallow errors like 'EXPORT_GPL(foo);' with missing header
 KBUILD_CFLAGS   += $(call cc-option,-Werror=implicit-int)
@@ -1017,10 +1048,6 @@ KBUILD_LDFLAGS	+= $(call ld-option,--no-warn-rwx-segments)
 
 ifeq ($(CONFIG_STRIP_ASM_SYMS),y)
 LDFLAGS_vmlinux	+= $(call ld-option, -X,)
-endif
-
-ifeq ($(CONFIG_RELR),y)
-LDFLAGS_vmlinux	+= --pack-dyn-relocs=relr
 endif
 
 # insure the checker run with the right endianness
@@ -1140,20 +1167,25 @@ init-y		:= $(patsubst %/, %/built-in.a, $(init-y))
 core-y		:= $(patsubst %/, %/built-in.a, $(core-y))
 drivers-y	:= $(patsubst %/, %/built-in.a, $(drivers-y))
 net-y		:= $(patsubst %/, %/built-in.a, $(net-y))
+libs-y2		:= $(patsubst %/, %/built-in.a, $(filter %/, $(libs-y)))
+ifdef CONFIG_MODULES
+libs-y1		:= $(filter-out %/, $(libs-y))
+libs-y2		+= $(patsubst %/, %/lib.a, $(filter %/, $(libs-y)))
+else
 libs-y1		:= $(patsubst %/, %/lib.a, $(libs-y))
-libs-y2		:= $(patsubst %/, %/built-in.a, $(filter-out %.a, $(libs-y)))
+endif
 virt-y		:= $(patsubst %/, %/built-in.a, $(virt-y))
 
 # Externally visible symbols (used by link-vmlinux.sh)
-export KBUILD_VMLINUX_INIT := $(head-y) $(init-y)
-export KBUILD_VMLINUX_MAIN := $(core-y) $(libs-y2) $(drivers-y) $(net-y) $(virt-y)
+export KBUILD_VMLINUX_OBJS := $(head-y) $(init-y) $(core-y) $(libs-y2) \
+			      $(drivers-y) $(net-y) $(virt-y)
 export KBUILD_VMLINUX_LIBS := $(libs-y1)
 export KBUILD_LDS          := arch/$(SRCARCH)/kernel/vmlinux.lds
 export LDFLAGS_vmlinux
 # used by scripts/package/Makefile
 export KBUILD_ALLDIRS := $(sort $(filter-out arch/%,$(vmlinux-alldirs)) arch Documentation include samples scripts tools)
 
-vmlinux-deps := $(KBUILD_LDS) $(KBUILD_VMLINUX_INIT) $(KBUILD_VMLINUX_MAIN) $(KBUILD_VMLINUX_LIBS)
+vmlinux-deps := $(KBUILD_LDS) $(KBUILD_VMLINUX_OBJS) $(KBUILD_VMLINUX_LIBS)
 
 # Recurse until adjust_autoksyms.sh is satisfied
 PHONY += autoksyms_recursive
@@ -1361,7 +1393,7 @@ headers_install: __headers
 	  $(error Headers not exportable for the $(SRCARCH) architecture))
 	$(Q)$(MAKE) $(hdr-inst)=include/uapi dst=include
 	$(Q)$(MAKE) $(hdr-inst)=arch/$(SRCARCH)/include/uapi $(hdr-dst)
-	$(Q)$(MAKE) $(hdr-inst)=techpack
+	$(Q)$(MAKE) $(hdr-inst)=techpack/audio/include/uapi dst=techpack/audio/include
 
 PHONY += headers_check_all
 headers_check_all: headers_install_all
@@ -1371,7 +1403,7 @@ PHONY += headers_check
 headers_check: headers_install
 	$(Q)$(MAKE) $(hdr-inst)=include/uapi dst=include HDRCHECK=1
 	$(Q)$(MAKE) $(hdr-inst)=arch/$(SRCARCH)/include/uapi $(hdr-dst) HDRCHECK=1
-	$(Q)$(MAKE) $(hdr-inst)=techpack HDRCHECK=1
+	$(Q)$(MAKE) $(hdr-inst)=techpack/audio/include/uapi dst=techpack/audio/include HDRCHECK=1
 
 # ---------------------------------------------------------------------------
 # Kernel selftest
@@ -1488,7 +1520,7 @@ MRPROPER_FILES += .config .config.old .version \
 		  Module.symvers tags TAGS cscope* GPATH GTAGS GRTAGS GSYMS \
 		  signing_key.pem signing_key.priv signing_key.x509	\
 		  x509.genkey extra_certificates signing_key.x509.keyid	\
-		  signing_key.x509.signer vmlinux-gdb.py
+		  signing_key.x509.signer vmlinux-gdb.py .thinlto-cache
 
 # clean - Delete most, but leave enough to build external modules
 #
@@ -1722,7 +1754,7 @@ $(clean-dirs):
 	$(Q)$(MAKE) $(clean)=$(patsubst _clean_%,%,$@)
 
 clean:	rm-dirs := $(MODVERDIR)
-clean: rm-files := $(KBUILD_EXTMOD)/Module.symvers
+clean: rm-files := $(KBUILD_EXTMOD)/Module.symvers $(KBUILD_EXTMOD)/.thinlto-cache
 
 PHONY += help
 help:
